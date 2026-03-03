@@ -1,0 +1,467 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# РќР°СЃС‚СЂРѕР№РєР° Р»РѕРіРёСЂРѕРІР°РЅРёСЏ
+logging.basicConfig(level=logging.INFO)
+
+# РўРѕРєРµРЅ Р±РѕС‚Р°
+TOKEN = "8688529527:AAFsoH7SaB_TJHPjPp90ENmzRsSuer0_nHU"
+
+# ID Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂРѕРІ (Р»СЋРґРµР№ СЃ РґРѕСЃС‚СѓРїРѕРј РєРѕ РІСЃРµРј СЂР°Р·РґРµР»Р°Рј)
+ADMIN_IDS = [7510064545, 7883082217, 8118030418]
+
+# ID РјРѕРґРµСЂР°С‚РѕСЂРѕРІ (РґР»СЏ С‚РёРєРµС‚РѕРІ)
+MODERATOR_IDS = [7510064545, 7883082217, 8118030418]
+
+# ID РїСЂРѕРІРµСЂСЏСЋС‰РёС… RP (3 С‡РµР»РѕРІРµРєР°)
+RP_CHECKERS = [7510064545, 7883082217, 8118030418]
+
+# РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ Р±РѕС‚Р° Рё РґРёСЃРїРµС‚С‡РµСЂР°
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# РЎРѕСЃС‚РѕСЏРЅРёСЏ РґР»СЏ FSM
+class RPStates(StatesGroup):
+    waiting_for_photo = State()
+    waiting_for_plot = State()
+    waiting_for_roles = State()
+    waiting_for_time = State()
+    waiting_for_reason = State()  # Р”Р»СЏ РїСЂРёС‡РёРЅС‹ РѕС‚РєР°Р·Р°
+
+class TicketStates(StatesGroup):
+    waiting_for_description = State()
+    waiting_for_confirmation = State()
+    active_ticket = State()  # РђРєС‚РёРІРЅС‹Р№ С‚РёРєРµС‚
+    waiting_for_close_confirmation = State()  # РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ Р·Р°РєСЂС‹С‚РёСЏ
+
+# РҐСЂР°РЅРёР»РёС‰Рµ РґР°РЅРЅС‹С…
+user_rp_data = {}
+active_tickets = {}
+ticket_counter = 0
+active_moderator_tickets = {} 
+
+# РљР»Р°РІРёР°С‚СѓСЂС‹
+def get_main_keyboard(user_id):
+    """РћСЃРЅРѕРІРЅР°СЏ РєР»Р°РІРёР°С‚СѓСЂР° РґР»СЏ РІСЃРµС… РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="рџ“ќ РџСЂРµРґР»РѕР¶РёС‚СЊ RP")],
+            [KeyboardButton(text="рџ† РћР±СЂР°С‚РёС‚СЊСЃСЏ РІ РјРѕРґРµСЂР°С†РёСЋ")]
+        ],
+        resize_keyboard=True
+    )
+    return keyboard
+
+def get_rp_check_keyboard(rp_id, user_id):
+    """РљР»Р°РІРёР°С‚СѓСЂР° РґР»СЏ РїСЂРѕРІРµСЂСЏСЋС‰РёС… RP"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="вњ… РћРґРѕР±СЂРёС‚СЊ", callback_data=f"approve_{user_id}")
+    builder.button(text="вќЊ РћС‚РєР°Р·Р°С‚СЊ", callback_data=f"reject_{user_id}_{rp_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_ticket_keyboard(ticket_id):
+    """РљР»Р°РІРёР°С‚СѓСЂР° РґР»СЏ РјРѕРґРµСЂР°С‚РѕСЂРѕРІ РїСЂРё РЅРѕРІРѕРј С‚РёРєРµС‚Рµ"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="рџ“ћ РџСЂРёРЅСЏС‚СЊ С‚РёРєРµС‚", callback_data=f"take_ticket_{ticket_id}")
+    return builder.as_markup()
+
+def get_ticket_close_keyboard(ticket_id):
+    """РљР»Р°РІРёР°С‚СѓСЂР° РґР»СЏ Р·Р°РєСЂС‹С‚РёСЏ С‚РёРєРµС‚Р°"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="вњ… Р”Р°, Р·Р°РєСЂС‹С‚СЊ", callback_data=f"close_ticket_{ticket_id}")
+    builder.button(text="вќЊ РќРµС‚, РїСЂРѕРґРѕР»Р¶РёС‚СЊ", callback_data=f"continue_ticket_{ticket_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_confirmation_keyboard():
+    """РљР»Р°РІРёР°С‚СѓСЂР° РґР»СЏ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ СЃРѕР·РґР°РЅРёСЏ С‚РёРєРµС‚Р°"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="вњ… Р”Р°, СЃРѕР·РґР°С‚СЊ С‚РёРєРµС‚", callback_data="confirm_ticket")
+    builder.button(text="вќЊ РќРµС‚, РѕС‚РјРµРЅРёС‚СЊ", callback_data="cancel_ticket")
+    builder.adjust(2)
+    return builder.as_markup()
+
+# РљРѕРјР°РЅРґР° /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    
+    welcome_text = (
+        "рџ‘‹ Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ РЅР°С€ RP РїСЂРѕРµРєС‚!\n\n"
+        "Р—РґРµСЃСЊ РІС‹ РјРѕР¶РµС‚Рµ РїСЂРµРґР»РѕР¶РёС‚СЊ СЃРІРѕСЋ СЂРѕР»РµРІСѓСЋ РёРіСЂСѓ РёР»Рё "
+        "РѕР±СЂР°С‚РёС‚СЊСЃСЏ РІ РјРѕРґРµСЂР°С†РёСЋ РІ СЃР»СѓС‡Р°Рµ РїСЂРѕР±Р»РµРј."
+    )
+    
+    await message.answer(
+        welcome_text,
+        reply_markup=get_main_keyboard(user_id)
+    )
+
+# РћР±СЂР°Р±РѕС‚РєР° РєРЅРѕРїРєРё "РџСЂРµРґР»РѕР¶РёС‚СЊ RP"
+@dp.message(F.text == "рџ“ќ РџСЂРµРґР»РѕР¶РёС‚СЊ RP")
+async def propose_rp(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    await message.answer(
+        "рџ“ё РџСЂРёРєСЂРµРїРёС‚Рµ С„РѕС‚Рѕ РґР»СЏ РІР°С€РµРіРѕ RP:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(RPStates.waiting_for_photo)
+
+# РџРѕР»СѓС‡РµРЅРёРµ С„РѕС‚Рѕ
+@dp.message(RPStates.waiting_for_photo, F.photo)
+async def get_rp_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    photo_id = message.photo[-1].file_id
+    
+    # РЎРѕС…СЂР°РЅСЏРµРј С„РѕС‚Рѕ
+    if user_id not in user_rp_data:
+        user_rp_data[user_id] = {}
+    user_rp_data[user_id]['photo_id'] = photo_id
+    
+    await message.answer(
+        "рџ“ќ РћРїРёС€РёС‚Рµ СЃСЋР¶РµС‚ РІР°С€РµРіРѕ RP:"
+    )
+    await state.set_state(RPStates.waiting_for_plot)
+
+@dp.message(RPStates.waiting_for_photo)
+async def get_rp_photo_invalid(message: types.Message):
+    await message.answer("РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РѕС‚РїСЂР°РІСЊС‚Рµ С„РѕС‚Рѕ.")
+
+# РџРѕР»СѓС‡РµРЅРёРµ СЃСЋР¶РµС‚Р°
+@dp.message(RPStates.waiting_for_plot)
+async def get_rp_plot(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_rp_data[user_id]['plot'] = message.text
+    
+    await message.answer(
+        "рџЋ­ РЈРєР°Р¶РёС‚Рµ РЅРµРѕР±С…РѕРґРёРјС‹Рµ СЂРѕР»Рё:"
+    )
+    await state.set_state(RPStates.waiting_for_roles)
+
+# РџРѕР»СѓС‡РµРЅРёРµ СЂРѕР»РµР№
+@dp.message(RPStates.waiting_for_roles)
+async def get_rp_roles(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_rp_data[user_id]['roles'] = message.text
+    
+    await message.answer(
+        "вЏ° РЈРєР°Р¶РёС‚Рµ РІСЂРµРјСЏ РЅР°С‡Р°Р»Р° RP:"
+    )
+    await state.set_state(RPStates.waiting_for_time)
+
+# РџРѕР»СѓС‡РµРЅРёРµ РІСЂРµРјРµРЅРё Рё РѕС‚РїСЂР°РІРєР° РЅР° РїСЂРѕРІРµСЂРєСѓ
+@dp.message(RPStates.waiting_for_time)
+async def get_rp_time(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_rp_data[user_id]['time'] = message.text
+    user_rp_data[user_id]['username'] = message.from_user.username or f"id{user_id}"
+    
+    # РћС‚РїСЂР°РІР»СЏРµРј С‚СЂРµРј РїСЂРѕРІРµСЂСЏСЋС‰РёРј
+    for checker_id in RP_CHECKERS:
+        try:
+            # Р¤РѕСЂРјРёСЂСѓРµРј СЃРѕРѕР±С‰РµРЅРёРµ РґР»СЏ РїСЂРѕРІРµСЂСЏСЋС‰РёС…
+            rp_info = (
+                f"рџ”” РќРѕРІР°СЏ Р·Р°СЏРІРєР° РЅР° RP РѕС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ @{user_rp_data[user_id]['username']} (ID: {user_id})\n\n"
+                f"рџ“ё Р¤РѕС‚Рѕ:"
+            )
+            
+            # РћС‚РїСЂР°РІР»СЏРµРј С„РѕС‚Рѕ СЃ РїРѕРґРїРёСЃСЊСЋ
+            await bot.send_photo(
+                chat_id=checker_id,
+                photo=user_rp_data[user_id]['photo_id'],
+                caption=rp_info,
+                reply_markup=get_rp_check_keyboard(checker_id, user_id)
+            )
+            
+            # РћС‚РїСЂР°РІР»СЏРµРј РѕСЃС‚Р°Р»СЊРЅСѓСЋ РёРЅС„РѕСЂРјР°С†РёСЋ РѕС‚РґРµР»СЊРЅС‹Рј СЃРѕРѕР±С‰РµРЅРёРµРј
+            details = (
+                f"рџ“ќ РЎСЋР¶РµС‚: {user_rp_data[user_id]['plot']}\n"
+                f"рџЋ­ Р РѕР»Рё: {user_rp_data[user_id]['roles']}\n"
+                f"вЏ° Р’СЂРµРјСЏ: {user_rp_data[user_id]['time']}"
+            )
+            await bot.send_message(checker_id, details)
+            
+        except Exception as e:
+            logging.error(f"РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ Р·Р°СЏРІРєСѓ РїСЂРѕРІРµСЂСЏСЋС‰РµРјСѓ {checker_id}: {e}")
+    
+    await message.answer(
+        "вњ… Р’Р°С€Р° Р·Р°СЏРІРєР° РѕС‚РїСЂР°РІР»РµРЅР° РЅР° РїСЂРѕРІРµСЂРєСѓ. РћР¶РёРґР°Р№С‚Рµ СЂРµС€РµРЅРёСЏ.",
+        reply_markup=get_main_keyboard(user_id)
+    )
+    await state.clear()
+
+# РћРґРѕР±СЂРµРЅРёРµ RP
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve_rp(callback: types.CallbackQuery):
+    user_id = int(callback.data.split("_")[1])
+    
+    try:
+        await bot.send_message(
+            user_id,
+            "вњ… Р’Р°С€Р° Р°РЅРєРµС‚Р° РЅР° RP РѕРґРѕР±СЂРµРЅР°!"
+        )
+        await callback.answer("Р—Р°СЏРІРєР° РѕРґРѕР±СЂРµРЅР°")
+    except Exception as e:
+        await callback.answer("РћС€РёР±РєР° РїСЂРё РѕС‚РїСЂР°РІРєРµ СѓРІРµРґРѕРјР»РµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ")
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+# РћС‚РєР°Р· RP (Р·Р°РїСЂРѕСЃ РїСЂРёС‡РёРЅС‹)
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_rp_request(callback: types.CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    user_id = int(parts[1])
+    checker_id = int(parts[2])
+    
+    # РЎРѕС…СЂР°РЅСЏРµРј РґР°РЅРЅС‹Рµ РґР»СЏ СЃРѕСЃС‚РѕСЏРЅРёСЏ
+    await state.update_data(reject_user_id=user_id, checker_id=checker_id)
+    
+    await callback.message.answer(
+        "рџ“ќ Р’РІРµРґРёС‚Рµ РїСЂРёС‡РёРЅСѓ РѕС‚РєР°Р·Р°:"
+    )
+    await state.set_state(RPStates.waiting_for_reason)
+    await callback.answer()
+
+# РџРѕР»СѓС‡РµРЅРёРµ РїСЂРёС‡РёРЅС‹ РѕС‚РєР°Р·Р°
+@dp.message(RPStates.waiting_for_reason)
+async def get_reject_reason(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data['reject_user_id']
+    reason = message.text
+    
+    try:
+        await bot.send_message(
+            user_id,
+            f"вќЊ Р’Р°С€Р° Р°РЅРєРµС‚Р° РЅР° RP РѕС‚РєР»РѕРЅРµРЅР°.\nРџСЂРёС‡РёРЅР°: {reason}"
+        )
+        await message.answer("вњ… РџСЂРёРЅСЏС‚Рѕ")
+    except Exception as e:
+        await message.answer("РћС€РёР±РєР° РїСЂРё РѕС‚РїСЂР°РІРєРµ СѓРІРµРґРѕРјР»РµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ")
+    
+    await state.clear()
+
+# РћР±СЂР°Р±РѕС‚РєР° РєРЅРѕРїРєРё "РћР±СЂР°С‚РёС‚СЊСЃСЏ РІ РјРѕРґРµСЂР°С†РёСЋ"
+@dp.message(F.text == "рџ† РћР±СЂР°С‚РёС‚СЊСЃСЏ РІ РјРѕРґРµСЂР°С†РёСЋ")
+async def contact_moderation(message: types.Message, state: FSMContext):
+    await message.answer(
+        "рџ“ќ РћРїРёС€РёС‚Рµ РІР°С€Сѓ РїСЂРѕР±Р»РµРјСѓ:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(TicketStates.waiting_for_description)
+
+# РџРѕР»СѓС‡РµРЅРёРµ РѕРїРёСЃР°РЅРёСЏ РїСЂРѕР±Р»РµРјС‹
+@dp.message(TicketStates.waiting_for_description)
+async def get_ticket_description(message: types.Message, state: FSMContext):
+    description = message.text
+    
+    await state.update_data(description=description)
+    
+    await message.answer(
+        "Р’С‹ СѓРІРµСЂРµРЅС‹, С‡С‚Рѕ С…РѕС‚РёС‚Рµ СЃРѕР·РґР°С‚СЊ С‚РёРєРµС‚?",
+        reply_markup=get_confirmation_keyboard()
+    )
+    await state.set_state(TicketStates.waiting_for_confirmation)
+
+# РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃРѕР·РґР°РЅРёСЏ С‚РёРєРµС‚Р°
+@dp.callback_query(F.data == "confirm_ticket", StateFilter(TicketStates.waiting_for_confirmation))
+async def confirm_ticket(callback: types.CallbackQuery, state: FSMContext):
+    global ticket_counter
+    ticket_counter += 1
+    ticket_id = ticket_counter
+    
+    data = await state.get_data()
+    description = data.get('description', 'РќРµС‚ РѕРїРёСЃР°РЅРёСЏ')
+    user_id = callback.from_user.id
+    username = callback.from_user.username or f"id{user_id}"
+    
+    # РЎРѕС…СЂР°РЅСЏРµРј С‚РёРєРµС‚
+    active_tickets[ticket_id] = {
+        'user_id': user_id,
+        'moderator_id': None,
+        'description': description,
+        'username': username
+    }
+    
+    # РћС‚РїСЂР°РІР»СЏРµРј РјРѕРґРµСЂР°С‚РѕСЂР°Рј
+    for mod_id in MODERATOR_IDS:
+        try:
+            ticket_info = (
+                f"рџЋ« РќРѕРІС‹Р№ С‚РёРєРµС‚ #{ticket_id}\n"
+                f"РћС‚: @{username} (ID: {user_id})\n"
+                f"РџСЂРѕР±Р»РµРјР°: {description}"
+            )
+            await bot.send_message(
+                mod_id,
+                ticket_info,
+                reply_markup=get_ticket_keyboard(ticket_id)
+            )
+        except Exception as e:
+            logging.error(f"РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ С‚РёРєРµС‚ РјРѕРґРµСЂР°С‚РѕСЂСѓ {mod_id}: {e}")
+    
+    await callback.message.edit_text(
+        "вњ… РўРёРєРµС‚ СЃРѕР·РґР°РЅ. РћР¶РёРґР°Р№С‚Рµ РѕС‚РІРµС‚Р° РјРѕРґРµСЂР°С‚РѕСЂР°."
+    )
+    await state.clear()
+    
+    # РћС‚РїСЂР°РІР»СЏРµРј РѕСЃРЅРѕРІРЅСѓСЋ РєР»Р°РІРёР°С‚СѓСЂСѓ
+    await callback.message.answer(
+        "Р’С‹ РјРѕР¶РµС‚Рµ РїСЂРѕРґРѕР»Р¶РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚СЊСЃСЏ Р±РѕС‚РѕРј",
+        reply_markup=get_main_keyboard(user_id)
+    )
+
+# РћС‚РјРµРЅР° СЃРѕР·РґР°РЅРёСЏ С‚РёРєРµС‚Р°
+@dp.callback_query(F.data == "cancel_ticket", StateFilter(TicketStates.waiting_for_confirmation))
+async def cancel_ticket(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("вќЊ РЎРѕР·РґР°РЅРёРµ С‚РёРєРµС‚Р° РѕС‚РјРµРЅРµРЅРѕ.")
+    await state.clear()
+    
+    await callback.message.answer(
+        "Р’С‹ РјРѕР¶РµС‚Рµ РїСЂРѕРґРѕР»Р¶РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚СЊСЃСЏ Р±РѕС‚РѕРј",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+
+# РџСЂРёРЅСЏС‚РёРµ С‚РёРєРµС‚Р° РјРѕРґРµСЂР°С‚РѕСЂРѕРј
+@dp.callback_query(F.data.startswith("take_ticket_"))
+async def take_ticket(callback: types.CallbackQuery):
+    ticket_id = int(callback.data.split("_")[2])
+    moderator_id = callback.from_user.id
+    
+    # РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРґРµСЂР°С‚РѕСЂРѕРј
+    if moderator_id not in MODERATOR_IDS:
+        await callback.answer("РЈ РІР°СЃ РЅРµС‚ РїСЂР°РІ РјРѕРґРµСЂР°С‚РѕСЂР°!", show_alert=True)
+        return
+    
+    # РџСЂРѕРІРµСЂСЏРµРј, РЅРµ Р·Р°РЅСЏС‚ Р»Рё С‚РёРєРµС‚
+    if ticket_id not in active_tickets:
+        await callback.answer("РўРёРєРµС‚ СѓР¶Рµ Р·Р°РєСЂС‹С‚ РёР»Рё РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚!", show_alert=True)
+        return
+    
+    if active_tickets[ticket_id]['moderator_id'] is not None:
+        await callback.answer("Р­С‚РѕС‚ С‚РёРєРµС‚ СѓР¶Рµ РїСЂРёРЅСЏС‚ РґСЂСѓРіРёРј РјРѕРґРµСЂР°С‚РѕСЂРѕРј!", show_alert=True)
+        return
+    
+    # РќР°Р·РЅР°С‡Р°РµРј РјРѕРґРµСЂР°С‚РѕСЂР° РЅР° С‚РёРєРµС‚
+    active_tickets[ticket_id]['moderator_id'] = moderator_id
+    active_moderator_tickets[moderator_id] = ticket_id
+    
+    user_id = active_tickets[ticket_id]['user_id']
+    
+    # РЈРІРµРґРѕРјР»СЏРµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+    try:
+        await bot.send_message(
+            user_id,
+            f"вњ… Р’Р°С€ С‚РёРєРµС‚ #{ticket_id} РїСЂРёРЅСЏС‚ РјРѕРґРµСЂР°С‚РѕСЂРѕРј. РўРµРїРµСЂСЊ РІС‹ РјРѕР¶РµС‚Рµ РѕР±С‰Р°С‚СЊСЃСЏ РІ СЌС‚РѕРј С‡Р°С‚Рµ."
+        )
+    except Exception as e:
+        logging.error(f"РќРµ СѓРґР°Р»РѕСЃСЊ СѓРІРµРґРѕРјРёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ {user_id}: {e}")
+    
+    await callback.message.edit_text(
+        f"{callback.message.text}\n\nвњ… РўРёРєРµС‚ РїСЂРёРЅСЏС‚ РјРѕРґРµСЂР°С‚РѕСЂРѕРј @{callback.from_user.username}"
+    )
+    await callback.answer("РўРёРєРµС‚ РїСЂРёРЅСЏС‚")
+
+# РћР±СЂР°Р±РѕС‚РєР° СЃРѕРѕР±С‰РµРЅРёР№ РІ Р°РєС‚РёРІРЅРѕРј С‚РёРєРµС‚Рµ (С‚РѕР»СЊРєРѕ РґР»СЏ РјРѕРґРµСЂР°С‚РѕСЂР°, РїСЂРёРЅСЏРІС€РµРіРѕ С‚РёРєРµС‚)
+@dp.message()
+async def handle_ticket_messages(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text
+    
+    # РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРґРµСЂР°С‚РѕСЂРѕРј СЃ Р°РєС‚РёРІРЅС‹Рј С‚РёРєРµС‚РѕРј
+    if user_id in active_moderator_tickets:
+        ticket_id = active_moderator_tickets[user_id]
+        if ticket_id in active_tickets:
+            ticket = active_tickets[ticket_id]
+            user_to_send = ticket['user_id']
+            
+            # РЎРїРµС†РёР°Р»СЊРЅР°СЏ РєРѕРјР°РЅРґР° РґР»СЏ Р·Р°РєСЂС‹С‚РёСЏ С‚РёРєРµС‚Р°
+            if text and text.lower() == "Р·Р°РєСЂС‹С‚СЊ":
+                await message.answer(
+                    "Р’С‹ СѓРІРµСЂРµРЅС‹, С‡С‚Рѕ С…РѕС‚РёС‚Рµ Р·Р°РєСЂС‹С‚СЊ С‚РёРєРµС‚?",
+                    reply_markup=get_ticket_close_keyboard(ticket_id)
+                )
+                return
+            
+            # РџРµСЂРµСЃС‹Р»Р°РµРј СЃРѕРѕР±С‰РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ
+            try:
+                await bot.send_message(
+                    user_to_send,
+                    f"рџ“ћ РњРѕРґРµСЂР°С‚РѕСЂ: {message.text}"
+                )
+                await message.answer("вњ… РЎРѕРѕР±С‰РµРЅРёРµ РѕС‚РїСЂР°РІР»РµРЅРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ")
+            except Exception as e:
+                await message.answer("вќЊ РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ СЃРѕРѕР±С‰РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ")
+    
+    # РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СѓС‡Р°СЃС‚РЅРёРєРѕРј С‚РёРєРµС‚Р°
+    else:
+        # РС‰РµРј С‚РёРєРµС‚, РіРґРµ СЌС‚РѕС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ - Р°РІС‚РѕСЂ
+        for ticket_id, ticket in active_tickets.items():
+            if ticket['user_id'] == user_id and ticket['moderator_id'] is not None:
+                moderator_id = ticket['moderator_id']
+                
+                # РџРµСЂРµСЃС‹Р»Р°РµРј СЃРѕРѕР±С‰РµРЅРёРµ РјРѕРґРµСЂР°С‚РѕСЂСѓ
+                try:
+                    await bot.send_message(
+                        moderator_id,
+                        f"рџ‘¤ РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ: {message.text}"
+                    )
+                    await message.answer("вњ… РЎРѕРѕР±С‰РµРЅРёРµ РѕС‚РїСЂР°РІР»РµРЅРѕ РјРѕРґРµСЂР°С‚РѕСЂСѓ")
+                except Exception as e:
+                    await message.answer("вќЊ РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ СЃРѕРѕР±С‰РµРЅРёРµ РјРѕРґРµСЂР°С‚РѕСЂСѓ")
+                break
+
+# Р—Р°РєСЂС‹С‚РёРµ С‚РёРєРµС‚Р°
+@dp.callback_query(F.data.startswith("close_ticket_"))
+async def close_ticket(callback: types.CallbackQuery):
+    ticket_id = int(callback.data.split("_")[2])
+    moderator_id = callback.from_user.id
+    
+    if ticket_id in active_tickets:
+        ticket = active_tickets[ticket_id]
+        user_id = ticket['user_id']
+        
+        # РЈРІРµРґРѕРјР»СЏРµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+        try:
+            await bot.send_message(
+                user_id,
+                "рџ”’ РўРёРєРµС‚ Р±С‹Р» Р·Р°РєСЂС‹С‚ РјРѕРґРµСЂР°С‚РѕСЂРѕРј."
+            )
+        except Exception as e:
+            logging.error(f"РќРµ СѓРґР°Р»РѕСЃСЊ СѓРІРµРґРѕРјРёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ {user_id}: {e}")
+        
+        # РЈРґР°Р»СЏРµРј С‚РёРєРµС‚
+        if moderator_id in active_moderator_tickets:
+            del active_moderator_tickets[moderator_id]
+        del active_tickets[ticket_id]
+        
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\nвњ… РўРёРєРµС‚ #{ticket_id} Р·Р°РєСЂС‹С‚."
+        )
+        await callback.answer("РўРёРєРµС‚ Р·Р°РєСЂС‹С‚")
+    else:
+        await callback.answer("РўРёРєРµС‚ РЅРµ РЅР°Р№РґРµРЅ", show_alert=True)
+
+# РџСЂРѕРґРѕР»Р¶РµРЅРёРµ С‚РёРєРµС‚Р°
+@dp.callback_query(F.data.startswith("continue_ticket_"))
+async def continue_ticket(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "РџСЂРѕРґРѕР»Р¶Р°РµРј РѕР±С‰РµРЅРёРµ РІ С‚РёРєРµС‚Рµ. РќР°РїРёС€РёС‚Рµ 'Р·Р°РєСЂС‹С‚СЊ', РєРѕРіРґР° Р·Р°С…РѕС‚РёС‚Рµ Р·Р°РєСЂС‹С‚СЊ С‚РёРєРµС‚."
+    )
+    await callback.answer()
+
+# Р—Р°РїСѓСЃРє Р±РѕС‚Р°
+async def main():
+    print("Р‘РѕС‚ Р·Р°РїСѓС‰РµРЅ...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
